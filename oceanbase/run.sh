@@ -1,6 +1,6 @@
 #!/bin/bash -e
 
-WITH_EMON=1
+WITH_EMON=0
 
 if [[ $WITH_EMON -eq 1 ]] ; then
     touch result.csv
