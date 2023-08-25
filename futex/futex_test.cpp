@@ -15,13 +15,17 @@
 #define INNER_READ_TEST_COUNT  100000
 #define INNER_WRITE_TEST_COUNT 1000000
 #define WAKE_NUM 10
-#define WAIT_TIME 100
+// #define WAIT_TIME 1000
+uint32_t WAIT_TIME = 1000;
 
 #define VAL_EXCLUSIVE ((uint32_t)1 << 24)
+// #define VAL_WAIT_MAX ((uint32_t)1 << 31)
 
 // #define DEBUG_WRITE_INNER_TIME
 
 std::atomic<uint32_t> lock(0);
+std::atomic<uint32_t> read_attemps(0);
+std::atomic<uint32_t> write_attemps(0);
 volatile int __futex = 0;
 
 extern "C" {
@@ -176,82 +180,45 @@ uint64_t rdtsc()
 }
 
 
-#define TRANS_PER_THREAD	1L << 20
+// #define TRANS_PER_THREAD	1L << 20
+// #define TRANS_PER_THREAD 100000
+#define TRANS_PER_THREAD 100000
 static long write_count=0;
+static long read_count=0;
+static int sleep_count = 10;
 void* do_trans(void *arg)
 {
 	int _mod = *((int*)arg);
 
-	int sleep_count;
-	//get a random value
 	for(long i=0;i<TRANS_PER_THREAD;i++)
 	{
-//		int _rnd = rand();
-
 		if(i % _mod == 0){
-        //do write lock
+        //do write lock      
       while (!write_lock()) {
+        write_attemps++;
         timespec ts = make_timespec(WAIT_TIME);
         futex_wait(&__futex, 0, &ts);
-        // futex_wait(&__futex, 0, NULL);
       }
 			write_count++;
-			sleep_count = rdtsc() % 100;		
+			// sleep_count = rdtsc() % 100;
 			for(int j=0;j<sleep_count;j++)
 				_mm_pause();
       write_unlock();
 		} else {
       while (!read_lock()) {
-        // printf("read don't get lock %d\n", lock.load());
+        read_attemps++;
         timespec ts = make_timespec(WAIT_TIME);
         futex_wait(&__futex, 0, &ts);
-        // futex_wait(&__futex, 0, NULL);
       }
-			
-			// if(write_count % 100000000 == 10000000) {
-			// 	printf("current write count %ld\n", write_count);
-      // }
-      sleep_count = rdtsc() % 100;
+			read_count++;
+      // sleep_count = rdtsc() % 100;
 			for(int j=0;j<sleep_count;j++)
 				_mm_pause();
-
       read_unlock();
 		}
 	}
 	return NULL;
 }
-
-// int main()
-// {
-//   pthread_t rthreads[NUM_READERS];
-//   pthread_t wthreads[NUM_WRITERS];
-
-//   struct timespec start, end;
-
-//   timespec_get(&start, TIME_UTC);
-  
-//   for (int i = 0; i < NUM_READERS; i++)
-//     pthread_create(&rthreads[i], NULL, reader, NULL);
-
-//   for (int i = 0; i < NUM_WRITERS; i++)
-//     pthread_create(&wthreads[i], NULL, writer, NULL);
-  
-//   for (int i = 0; i < NUM_READERS; i++)
-//     pthread_join(rthreads[i], NULL);
-
-//   for (int i = 0; i < NUM_WRITERS; i++)
-//     pthread_join(wthreads[i], NULL);
-
-//   timespec_get(&end, TIME_UTC);
-
-//   double elapsed = (end.tv_sec - start.tv_sec) +
-//                    (end.tv_nsec - start.tv_nsec) / 1000000000.0;
-
-//   printf("Elapsed: %f\n", elapsed);
-
-//   return 0;
-// }
-
 
 int main(int argc, char* argv[])
 {	
@@ -273,30 +240,46 @@ int main(int argc, char* argv[])
 	if(read_ratio != 100){
 		 mod = 100/(100-read_ratio);
 	}
+  // printf("mod: %ld\n", mod);
 
-	threadlist = (pthread_t*) malloc(sizeof(pthread_t) * thread_num);
+  while (sleep_count <=200) {
+    while (WAIT_TIME <= 1000) {
+      threadlist = (pthread_t*) malloc(sizeof(pthread_t) * thread_num);
+      write_count = 0;
+      read_count = 0;
+      write_attemps = 0;
+      read_attemps = 0;
+      srand(111);    
+      for(int i=0;i<thread_num;i++)
+      {
+        err = pthread_create(&threadlist[i],NULL,do_trans,&mod);
+        if(err){
+          printf("new thread create failed\n");
+          return -1;
+        }
+      }
+      gettimeofday(&start,NULL);
+      
+      for(int i=0;i<thread_num;i++){
+        pthread_join(threadlist[i],NULL);
+      }
+      gettimeofday(&end,NULL);
 
-	srand(111);
+      double timeused = ( end.tv_sec - start.tv_sec ) + (end.tv_usec - start.tv_usec)/1000000.0;
+      // printf("thread_num: %d: read_ratio: %d: execution time: %lf: num of write: %ld num of read: %ld write_attempt: %ld read_attempt: %ld\n", 
+      //     thread_num, read_ratio, timeused, write_count, read_count, write_attemps.load(), read_attemps.load());	
+      printf("%d; %d; %d; %ld; %lf; %ld; %ld; %ld; %ld;\n", thread_num, sleep_count, read_ratio, (WAIT_TIME/1000), timeused, write_count, read_count, write_attemps.load(), read_attemps.load());  
 
-	for(int i=0;i<thread_num;i++)
-	{
-		err = pthread_create(&threadlist[i],NULL,do_trans,&mod);
-		if(err){
-			printf("new thread create failed\n");
-			return -1;
-		}
-	}
-	gettimeofday(&start,NULL);
-	
-	for(int i=0;i<thread_num;i++){
-		pthread_join(threadlist[i],NULL);
-	}
-	gettimeofday(&end,NULL);
+      free(threadlist);
 
-	double timeused = ( end.tv_sec - start.tv_sec ) + (end.tv_usec - start.tv_usec)/1000000.0;
-	printf("thread_num: %d: read_ratio: %d: execution time: %lf: num of write: %ld\n", thread_num, read_ratio, timeused, write_count);
+      WAIT_TIME = WAIT_TIME * 2;
+    }
+    WAIT_TIME = 1000;
+    sleep_count = sleep_count + 10;  
+  }
 
-	free(threadlist);
+
+
 
 	return 0;
 

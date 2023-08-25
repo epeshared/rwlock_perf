@@ -2,7 +2,8 @@
 source /opt/intel/sep/sep_vars.sh
 
 emon -collect-edp > emon.dat &
-sleep 5
+sleep 10
 emon -stop
+killall -9 ./futex_test
 emon -process-pyedp /opt/intel/sep/config/edp/pyedp_config.txt
 # mv summary.xlsx ${EMON_DIR}
