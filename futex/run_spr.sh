@@ -2,7 +2,7 @@
 
 WITH_EMON=0
 # CORE_SET="0-15,120-135"
-CORE_SET=""
+CORE_SET="0-15"
 
 if [ -z "$CORE_SET" ]; then
     echo "CORE_SET is empty" 
@@ -98,10 +98,10 @@ else
     else
         echo "CORE_SET is ${CORE_SET}"
         echo "taskset -ca ${CORE_SET}"
-        echo -e "thread_num;read_ratio;wait_time(ns);execution time;num of write;num of read;write_attempt;read_attempt"
-        taskset -ca ${CORE_SET} ./futex_test 200 100
-        taskset -ca ${CORE_SET} ./futex_test 200 80
-        taskset -ca ${CORE_SET} ./futex_test 200 50
+        echo -e "thread_num;sleep_count;read_ratio;wait_time(ns);execution time;num of write;num of read;write_attempt;read_attempt"
+        taskset -ca ${CORE_SET} ./futex_test 16 100
+        taskset -ca ${CORE_SET} ./futex_test 16 80
+        taskset -ca ${CORE_SET} ./futex_test 16 50
     fi
 fi
 
