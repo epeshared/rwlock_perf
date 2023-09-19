@@ -20,12 +20,15 @@
 #define WAKE_NUM 10
 
 // #define CMPCCXADD
+// #define DEBUG
 
 // #define WAIT_TIME 1000
-uint32_t WAIT_TIME = 1000;
-
-#define VAL_EXCLUSIVE	      ((uint32_t) ((1 << 24)-1))
-#define LW_VAL_EXCLUSIVE		((uint32_t) 1 << 24)
+static uint32_t WAIT_TIME = 1000;
+static const uint32_t WRITE_MASK = 1<<30;
+static const uint32_t WAIT_MASK = 1<<31;
+static const uint32_t MAX_READ_LOCK_CNT = 1<<24;
+static const uint32_t VAL_EXCLUSIVE = ((1 << 24)-1);
+// #define LW_VAL_EXCLUSIVE		((uint32_t) 1 << 24)
 // #define VAL_WAIT_MAX ((uint32_t)1 << 31)
 
 // #define DEBUG_WRITE_INNER_TIME
@@ -33,7 +36,8 @@ uint32_t WAIT_TIME = 1000;
 #ifdef CMPCCXADD
 static uint32_t lock = 0;
 #else
-std::atomic<uint32_t> lock(0);
+// std::atomic<uint32_t> lock(0);
+static uint32_t lock = 0;
 #endif
 std::atomic<uint32_t> read_attemps(0);
 std::atomic<uint32_t> write_attemps(0);
@@ -82,25 +86,29 @@ int read_lock()
 	uint32_t old_val;
 	uint32_t threshold = VAL_EXCLUSIVE;
 
-  // printf("read lock %d\n", lock);
-  old_val = _cmpccxadd_epi32(&lock, VAL_EXCLUSIVE, 1, _CMPCCX_B);
-  // printf("read lock old_val %d lock is %d\n", old_val, lock);
-  
+  old_val = _cmpccxadd_epi32(&lock, threshold, 1, _CMPCCX_B);
   if (old_val < threshold) {
     return true;
   }
+  #ifdef DEBUG
+  printf("read lock old value %u\n", old_val); 
+  #endif
 
   return false;
 #else
   uint32_t old_val;
-  old_val = lock.load();
+  __atomic_load(&lock, &old_val, __ATOMIC_SEQ_CST);
   if (old_val >= VAL_EXCLUSIVE) {
     return false;
   }
 
-  if (lock.compare_exchange_strong(old_val, old_val + 1)) {    
+  uint32_t desired = old_val + 1;
+  if (__atomic_compare_exchange(&lock, &old_val, &desired, true, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
     return true;
   }
+  // if (lock.compare_exchange_strong(old_val, old_val + 1)) {    
+  //   return true;
+  // }
 
   return false;
 #endif
@@ -108,82 +116,100 @@ int read_lock()
 
 int read_unlock()
 {
-  uint32_t old_val;
 #ifdef CMPCCXADD
-  old_val = __atomic_fetch_sub(&lock, 1, __ATOMIC_SEQ_CST);
-  // old_val = _cmpccxadd_epi32(&lock, VAL_EXCLUSIVE, -1, _CMPCCX_L);
-#else
-  old_val = lock.fetch_sub(1);
+  uint32_t old_val = _cmpccxadd_epi32(&lock, (MAX_READ_LOCK_CNT | WAIT_MASK), -1, _CMPCCX_B);
+  if (old_val == 0) {
+    printf("read unlock old_val value is %u, ERROR!\n", old_val);
+    _exit(0);
+  }
+#ifdef DEBUG
+  printf("read unlock old value %u\n", old_val);
 #endif  
+
+  futex_wake(&__futex, WAKE_NUM);
+  return 0;
+#else
+  uint32_t old_val = __atomic_fetch_sub(&lock, 1, __ATOMIC_SEQ_CST);
+  // old_val = lock.fetch_sub(1);  
+
   if (old_val == 0)
   {
-    printf("read lock old_val value is %d lock is %d, ERROR!\n", old_val, lock.load());
+    printf("read lock old_val value is %d, ERROR!\n", old_val);
     _exit(0);
   }
 
-  if (old_val < LW_VAL_EXCLUSIVE)
+  if (old_val < (MAX_READ_LOCK_CNT | WAIT_MASK))
   {
     futex_wake(&__futex, WAKE_NUM);
   } else {
-    printf("read lock old_val %d is exceed VAL_EXCLUSIVE, ERROR!\n", old_val);
+    printf("read lock old_val %d is exceed MAX_READ_LOCK_CNT, ERROR!\n", old_val);
     _exit(0);    
   }
+#endif  
   return 0;
 
 }
 
 int write_lock()
 {
-#ifdef CMPCCXADD
-	uint32_t old_val;
-	uint32_t threshold = 1;
+// #ifdef CMPCCXADD
+//   uint32_t old_val = _cmpccxadd_epi32(&lock, WAIT_MASK, -WRITE_MASK, _CMPCCX_Z);
+//   if (old_val != WAIT_MASK) { //lock !=0, not locked
+//     old_val = _cmpccxadd_epi32(&lock, 1, WRITE_MASK, _CMPCCX_B);
+//     if (old_val != 0) { // lock != WAIT_MASK, not locked
+//     #ifdef DEBUG
+//       printf("write_lock not lock old value %u\n", old_val);
+//     #endif
+//       return false;
+//     }
+//   }
+// #ifdef DEBUG
+//   printf("write_lock lock old value %u\n", old_val);
+// #endif
 
-  // printf("write lock %d\n", lock);
-  // printf("1\n");
-  old_val = _cmpccxadd_epi32(&lock, 1, LW_VAL_EXCLUSIVE, _CMPCCX_L);
-  // printf("2\n");
-  // printf("write lock old_val %d\n", old_val);
-
-  // if (old_val != 0) {
-  //   printf("write_lock pld value %d is below 0, ERROR!\n", old_val);
-  //   _exit(0);     
-  // }
-
-  if (old_val < 1) {
-    // printf("write lock get lock by old vlaue %d, lock %d\n", old_val, lock);
-    return true;
-  }
-
-  return false;
-#else
-  uint32_t old_val = lock.load();  
-  if (old_val == 0) {
-    if (lock.compare_exchange_strong(old_val, LW_VAL_EXCLUSIVE)) {
+//   return true;
+// #else
+  uint32_t old_lock;
+  __atomic_load(&lock, &old_lock, __ATOMIC_SEQ_CST);
+  if (0 == old_lock || (WAIT_MASK == old_lock)) {
+    uint32_t desired = WRITE_MASK;
+    if (__atomic_compare_exchange(&lock, &old_lock, &desired, true, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
       return true;
-    } else {
+    }else {
       return false;
     }    
   }
   return false;
-#endif
+// #endif
 }
 
 int write_unlock()
 {
   uint32_t old_val;
-#ifdef CMPCCXADD
-  old_val = __atomic_fetch_sub(&lock, LW_VAL_EXCLUSIVE, __ATOMIC_SEQ_CST);
-#else
-  old_val = lock.fetch_sub(LW_VAL_EXCLUSIVE);
-#endif
-  if (old_val != LW_VAL_EXCLUSIVE) {
-    printf("write lock value %d is not %d, ERROR!\n", old_val, VAL_EXCLUSIVE);
+// #ifdef CMPCCXADD
+//   old_val = _cmpccxadd_epi32(&lock, WRITE_MASK, -WRITE_MASK, _CMPCCX_Z);
+
+//   if (old_val != WRITE_MASK) {
+//     printf("write unlock old_val %d is not equal to WRITE_MASK) %u, ERROR!\n", old_val);
+//     exit(0);
+//   }
+// #ifdef DEBUG
+//   printf("write_lock unlock old value %u\n", old_val); 
+// #endif  
+  
+//   futex_wake(&__futex, WAKE_NUM);
+  
+// #else
+  // old_val = lock.fetch_sub(MAX_READ_LOCK_CNT);
+  old_val = __atomic_fetch_sub(&lock, WRITE_MASK, __ATOMIC_SEQ_CST);
+  if (old_val != WRITE_MASK) {
+    printf("write lock value %d is not %d, ERROR!\n", old_val, WRITE_MASK);
     _exit(0);    
   } else {
     // printf("write lock value %d is %d!\n", old_val, VAL_EXCLUSIVE);
     futex_wake(&__futex, WAKE_NUM);
   }
-  
+// #endif  
   return 0;
 }
 
@@ -202,36 +228,52 @@ uint64_t rdtsc()
 static long write_count=0;
 static long read_count=0;
 static int sleep_count = 10;
+static int write_sleep_count = 10;
 void* do_trans(void *arg)
 {
 	// int _mod = *((int*)arg);
   // uint32_t _mod = 1 << 31;
-  // printf("mod is %d\n",_mod);
+  // printf("mod is %d\n",_mod);  
 	for(int i=1;i<TRANS_PER_THREAD;i++)
 	{
 		if(i % mod == 0){
+      int try_write_count = 0;
   //       //do write lock      
       while (!write_lock()) {
-        // printf("try write lock\n");
+        // printf("try write lock %u\n", lock);
         write_attemps++;
+        try_write_count++;
+        if (try_write_count >= 5) {
+// #ifdef CMPCCXADD        
+//           _cmpccxadd_epi32(&lock, MAX_READ_LOCK_CNT, WAIT_MASK, _CMPCCX_B);
+// #else        
+          uint32_t old_lock;
+          __atomic_load(&lock, &old_lock, __ATOMIC_SEQ_CST);
+          if (old_lock < MAX_READ_LOCK_CNT) {
+            uint32_t desired = (old_lock | WAIT_MASK);
+            __atomic_compare_exchange(&lock, &old_lock, &desired, true, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);
+          }
+// #endif
+        }
         timespec ts = make_timespec(WAIT_TIME);
         futex_wait(&__futex, 0, &ts);
       }
-      // printf("got write lock\n");
+      // printf("got write lock %u\n", lock);
+      try_write_count = 0;
 			write_count++;
 			// sleep_count = rdtsc() % 100;
-			for(int j=0;j<sleep_count;j++)
+			for(int j=0;j<write_sleep_count;j++)
 				_mm_pause();
       write_unlock();
       // printf("unlock write lock\n");
 		} else {
       while (!read_lock()) {
-        // printf("try read lock\n");
+        // printf("try read lock %u\n", lock);
         read_attemps++;
         timespec ts = make_timespec(WAIT_TIME);
         futex_wait(&__futex, 0, &ts);
       }
-      // printf("got read lock\n");
+      // printf("got read lock %u\n", lock);
 			read_count++;
       // sleep_count = rdtsc() % 100;
 			for(int j=0;j<sleep_count;j++)
@@ -270,7 +312,8 @@ int main(int argc, char* argv[])
 
   // printf("mod: %ld\n", mod);
 
-  while (sleep_count <=200) {
+  while (sleep_count <=300) {
+    write_sleep_count = sleep_count*2;
     while (WAIT_TIME <= 1000) {
       threadlist = (pthread_t*) malloc(sizeof(pthread_t) * thread_num);
       write_count = 0;
@@ -304,7 +347,7 @@ int main(int argc, char* argv[])
       WAIT_TIME = WAIT_TIME * 2;
     }
     WAIT_TIME = 1000;
-    sleep_count = sleep_count + 10;  
+    sleep_count = sleep_count + 20;  
   }
 
 
